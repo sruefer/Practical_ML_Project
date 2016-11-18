@@ -1,0 +1,192 @@
+---
+title: "Practical ML - Course Project"
+author: "Steffen Ruefer"
+date: "18 November 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Executive Summary
+
+This project is about predicting the type of fitness exercise that was performed based on data measured from fitness gadgets that provide accelerometer data. The available data is split into a training and a validation set, and the provided test data is used for predicting. Multiple models are deployed, and the most accurate is used for prediction on the test data. Prior to the training phase, the available data is reviewed, cleaned and transformed. 
+
+
+# Background and Data Sources
+
+**From the Course Project Website:**
+
+"Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset)."
+
+The training data for this project are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+
+# Report Details
+
+## Load and View Data
+
+Loading required libraries:
+
+```{r load_libraries, echo, message=FALSE}
+library(caret)
+library(corrplot)
+library(e1071)
+library(dplyr)
+library(rpart)
+library(randomForest)
+```
+
+First, the available datasets are loaded into R and the dimensions of both sets are viewed.
+
+```{r load_raw_data, cache=TRUE}
+train.raw <- read.csv("pml-training.csv")             # Load training data
+test.raw <- read.csv("pml-testing.csv")               # Load test data
+dim(train.raw)                                        # Display dimension of training data
+dim(test.raw)                                         # Display dimension of test data
+```
+
+A quick view at the first 15 columns of the test dataset shows that the data consists out of different categories of data:
+
+- Identity and Time Data
+- Accelerometer Data
+- Data that is NA, i.e. missing
+
+```{r quicklook, cache=TRUE}
+glimpse(test.raw[, 1:15])
+```
+
+This is important for selecting predictor variables. As the objective is to predict exercise type from the (very small) test set, all variables that are partially or fully containing NA can be removed as they are not useful for prediction. 
+
+## Clean Data
+
+Apart from predictors that contain NA's, we also do not require identity and time data. While predicting exercise type by using time series data makes sense, in our case the test data is much too small for that; therefore, our models will not be time series models and all time data can be removed. Identity data is also not useful for prediction and will be removed, too. This will reduce the number of predictors considerably.
+
+```{r data_cleaning, cache=TRUE}
+## Use only columns that have no missing values in the test set
+is.missing <- sapply(test.raw, function (x) any(is.na(x) | x == ""))
+pred_names <- names(test.raw)[!is.missing]
+
+## Remove identity and time stamp columns
+pred_names_xt <- pred_names[8:59]
+pred_names_x <- c("classe", pred_names_xt)      # add "classe" column (for training set only)
+
+## Apply to train and test datasets
+x <- train.raw[, pred_names_x]                  # Reduced training set
+xt <- test.raw[, pred_names_xt]                 # Reduced test set
+dim(x)
+dim(xt)
+```
+
+The number of predictors is now down to 52. Let's have a look at the correlation plot. The _corrplot_ package was used for creating the correlation plot.
+
+```{r correlation_plot, cache=TRUE}
+correlation <- cor(x[, -1])                                              # Calculate correlation
+highlycorrelated <- findCorrelation(correlation, cutoff = 0.95)          # Cutoff set to 0.95
+highlycorrelated                                                         # display highly correlated predictors
+corrplot(correlation, method = "circle", order = "FPC", tl.cex = 0.5)    # Display Correlation Plot
+```
+
+There are 4 highly correlated predictors. However, I kept them for now as it does not significantly reduce the number of predictors and I do not know how it will affect prediction accuracy.
+
+## Explore Data
+
+To display the entire exploratory data for all predictors would exceed the required report size. Therefore we will show with two example predictors that the data varies between classification groups sufficiently to justify the use of models for classification. This if for visual confirmation only - statistic significance testing has been omitted for brevity.
+
+```{r exploratory_plots, cache=TRUE}
+# Display density plot of total_accel_belt
+ggplot(x, aes(x = total_accel_belt, fill = classe)) +
+      geom_density(alpha = 0.3) +
+      labs(title = "Density Plot of Total_Accel_Belt", 
+           subtitle = "Grouped by Exercise Type (classe)",
+           caption = "Data from http://groupware.les.inf.puc-rio.br/har")
+# Display density plot of total_accel_arm
+ggplot(x, aes(x = total_accel_arm, fill = classe)) +
+      geom_density(alpha = 0.3) +
+      labs(title = "Density Plot of Total_Accel_Arm", 
+           subtitle = "Grouped by Exercise Type (classe)",
+           caption = "Data from http://groupware.les.inf.puc-rio.br/har")
+```
+The above plots show that there is quite some variation in the data, which will be used for classification.
+
+## Apply Models and Evaluate Performance
+
+We will use two different models for classification: Decision Tree and Random Forest. Both can perform multi-class classification, though the Random Forest algorithm is expected to have better performance. For each model we will use the following settings:
+
+- Build the model with 70% of training set
+- Preprocessing: both used models work without center and scaling, so omitted
+- Validation of model performance using the other 30% of the training set
+
+We split the training data into 70 / 30 partitions. The larger partition will be used to train our model, while the smaller one will be used to compare model performances.
+
+For performance reasons, and because the dataset is reasonably large, I did not use cross-validation.
+
+```{r training_split}
+set.seed(3526)                                                          # Set seed for reproducibility
+inTrain <- createDataPartition(x$classe, p = 0.7, list = FALSE)         # Split the data
+xtrain <- x[inTrain, ]                                                  # Training Partition - 70%
+xval <- x[-inTrain, ]                                                   # Validation Partition - 30%
+```
+
+### Model 1 - Decision Tree
+
+We fit a decision tree model, using all variables, to the training data:
+
+```{r model_dt, cache=TRUE}
+set.seed(1285)
+fit_dt <- rpart(classe ~ ., data = xtrain, method = "class")       # Fit decision tree model
+```
+
+### Model 2 - Random Forest
+
+The second model is a random forest algorithm, without parameter tuning:
+
+```{r model_rf, cache=TRUE}
+set.seed(1378)
+fit_rf <- randomForest(classe ~. , data = xtrain)         # Fit random forest model
+```
+
+## Performance
+
+Performance, i.e. prediction accuracy is tested on the validation set for each model:
+
+```{r validation}
+# Decision Tree
+predictions_dt <- predict(fit_dt, xval, type = "class")          # Create Prediction
+confusionMatrix(predictions_dt, xval$classe)                     # Create Confusion Matrix
+
+# Random Forest
+predictions_rf <- predict(fit_rf, xval, type = "class")          # Create Prediction
+confusionMatrix(predictions_rf, xval$classe)                     # Create Confusion Matrix
+varImpPlot(fit_rf)                                               # Plot Variable Importance
+```
+
+As expected, the random forest algorithm does very well, with an overall accuracy above 99%. The decision tree however performs relatively poorly, with overall accuracy of only 74%. The performance difference is so significant that it is obvious which model to choose for prediction.
+
+
+### Prediction
+First we use the random forest model to predict the outcomes for the test dataset:
+
+```{r predict}
+predictions_rf_test <- predict(fit_rf, xt, type = "class")     # Make prediction with Random Forest
+```
+
+Function to create text files for submission to Quiz:
+
+```{r file_function}
+pml_write_files = function(x){
+      n = length(x)
+      for(i in 1:n){
+            filename = paste0("problem_id_",i,".txt")
+            write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+      }
+}
+pml_write_files(predictions_rf_test)           # Create 20 files with prediction results
+```
