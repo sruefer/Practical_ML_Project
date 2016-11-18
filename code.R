@@ -4,8 +4,7 @@
 #
 ####################################################################################################
 
-# Set Working Directory
-setwd("C:\\Users\\Steffen\\SkyDrive\\Files\\Data\\Development\\Data Science\\MOOC\\Coursera\\Data Science Specialization\\08 Practical ML\\Project")
+# NOTE: set your working directory and install required packages first!
 
 # Libraries
 library(caret)
